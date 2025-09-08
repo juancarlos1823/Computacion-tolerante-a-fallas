@@ -14,6 +14,9 @@ Un videojuego de carreras desarrollado con **Next.js** y **TypeScript** que impl
 - **Detección de colisiones** precisa usando algoritmo AABB
 <img width="1014" height="848" alt="image" src="https://github.com/user-attachments/assets/591139d7-e278-47d6-957f-320b84a5b5fd" />
 <img width="964" height="849" alt="image" src="https://github.com/user-attachments/assets/4dade06f-ecaf-4232-8d6e-00bfdf18212d" />
+<img width="975" height="947" alt="image" src="https://github.com/user-attachments/assets/a2e9bb1f-0a3f-4367-8fa2-c9dd4d05891b" />
+<img width="1024" height="942" alt="image" src="https://github.com/user-attachments/assets/a0073577-5c2c-4b7e-ad22-60958db9a8c9" />
+
 <img width="969" height="845" alt="image" src="https://github.com/user-attachments/assets/8cd8c036-30e2-4beb-9258-38f4fef76723" />
 
 ### Persistencia de Datos
