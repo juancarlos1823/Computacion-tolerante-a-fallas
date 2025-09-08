@@ -1,4 +1,4 @@
-# 🏎️ Car Racing Game con Sistema de Checkpoints
+# 🏎️ Car Racing Game con Hilos y funciones asincronas
 
 Un videojuego de carreras desarrollado con **Next.js** y **TypeScript** que implementa un sistema avanzado de checkpoints con persistencia de datos y técnicas de programación concurrente.
 
