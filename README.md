@@ -12,6 +12,9 @@ Un videojuego de carreras desarrollado con **Next.js** y **TypeScript** que impl
 - **Efectos visuales dinámicos** con animaciones pulsantes y brillos
 - **Barra de progreso** visual en tiempo real
 - **Detección de colisiones** precisa usando algoritmo AABB
+<img width="1014" height="848" alt="image" src="https://github.com/user-attachments/assets/591139d7-e278-47d6-957f-320b84a5b5fd" />
+<img width="964" height="849" alt="image" src="https://github.com/user-attachments/assets/4dade06f-ecaf-4232-8d6e-00bfdf18212d" />
+<img width="969" height="845" alt="image" src="https://github.com/user-attachments/assets/8cd8c036-30e2-4beb-9258-38f4fef76723" />
 
 ### Persistencia de Datos
 - **Guardado automático** cada 5 segundos y al pasar checkpoints
