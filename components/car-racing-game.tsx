@@ -64,6 +64,11 @@ export default function CarRacingGame() {
   const startTimeRef = useRef<number>(0)
   const lastSaveRef = useRef<number>(0)
 
+  const physicsWorkerRef = useRef<Worker | null>(null)
+  const effectsWorkerRef = useRef<Worker | null>(null)
+  const [workerSupported, setWorkerSupported] = useState(false)
+  const [offlineMode, setOfflineMode] = useState(false)
+
   const [gameState, setGameState] = useState<GameState>({
     car: {
       x: 100,
@@ -457,18 +462,50 @@ export default function CarRacingGame() {
     if (!canvas || !ctx || !gameState.gameStarted || gameState.gamePaused) return
 
     ctx.clearRect(0, 0, canvas.width, canvas.height)
-
     drawTrack(ctx)
     drawCheckpoints(ctx, gameState.checkpoints)
 
-    const newCar = { ...gameState.car }
-    updateCar(newCar)
-    drawCar(ctx, newCar)
+    // Usar Physics Worker si está disponible
+    if (physicsWorkerRef.current && workerSupported) {
+      const keys = Array.from(keysRef.current)
 
-    if (!gameState.raceCompleted) {
-      checkCheckpointCollision(newCar, gameState.checkpoints)
+      // Enviar datos al Physics Worker para procesamiento en paralelo
+      physicsWorkerRef.current.postMessage({
+        type: "UPDATE_CAR",
+        car: gameState.car,
+        keys,
+        canvasWidth: canvas.width,
+        canvasHeight: canvas.height,
+      })
+
+      // Verificar colisiones en Worker
+      physicsWorkerRef.current.postMessage({
+        type: "CHECK_COLLISION",
+        car: gameState.car,
+        checkpoints: gameState.checkpoints,
+        currentCheckpoint: gameState.currentCheckpoint,
+      })
+    } else {
+      // Fallback al hilo principal si Workers no están disponibles
+      const newCar = { ...gameState.car }
+      updateCar(newCar)
+
+      if (!gameState.raceCompleted) {
+        checkCheckpointCollision(newCar, gameState.checkpoints)
+      }
+
+      setGameState((prev) => ({ ...prev, car: newCar }))
     }
 
+    // Procesar efectos en Effects Worker
+    if (effectsWorkerRef.current) {
+      effectsWorkerRef.current.postMessage({
+        type: "PROCESS_EFFECTS",
+        deltaTime: 16,
+      })
+    }
+
+    drawCar(ctx, gameState.car)
     cleanupCheckpointEffects()
 
     if (gameState.raceCompleted) {
@@ -491,12 +528,11 @@ export default function CarRacingGame() {
 
     setGameState((prev) => ({
       ...prev,
-      car: newCar,
       raceTime: gameState.raceCompleted ? prev.raceTime : Date.now() - startTimeRef.current,
     }))
 
     animationRef.current = requestAnimationFrame(gameLoop)
-  }, [gameState, cleanupCheckpointEffects])
+  }, [gameState, workerSupported, cleanupCheckpointEffects])
 
   useEffect(() => {
     if (gameState.gameStarted && !gameState.gamePaused) {
@@ -603,8 +639,349 @@ export default function CarRacingGame() {
     </div>
   )
 
+  const saveGameAsync = useCallback(async (state: GameState) => {
+    if (state.raceCompleted || !state.gameStarted) return
+
+    const saveData: SavedGame = {
+      car: state.car,
+      checkpoints: state.checkpoints,
+      currentCheckpoint: state.currentCheckpoint,
+      raceTime: state.raceTime,
+      savedAt: Date.now(),
+      bestTime: state.bestTime,
+    }
+
+    try {
+      // Guardado asíncrono no bloqueante
+      await new Promise<void>((resolve, reject) => {
+        setTimeout(() => {
+          try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(saveData))
+            lastSaveRef.current = Date.now()
+
+            // Registrar sincronización en segundo plano si está offline
+            if ("serviceWorker" in navigator && navigator.serviceWorker.ready) {
+              navigator.serviceWorker.ready.then((registration) => {
+                if (registration.sync) {
+                  registration.sync.register("background-save")
+                }
+              })
+            }
+
+            resolve()
+          } catch (error) {
+            reject(error)
+          }
+        }, 0) // Usar setTimeout para hacer la operación asíncrona
+      })
+
+      console.log("[Game] Partida guardada asincrónicamente")
+    } catch (error) {
+      console.error("[Game] Error en guardado asíncrono:", error)
+    }
+  }, [])
+
+  const handleCheckpointCollision = useCallback(
+    (checkpointId: number) => {
+      const currentTime = Date.now()
+
+      // Agregar efecto visual usando Effects Worker
+      if (effectsWorkerRef.current) {
+        effectsWorkerRef.current.postMessage({
+          type: "ADD_EFFECT",
+          newEffect: {
+            type: "GLOW",
+            x: gameState.car.x,
+            y: gameState.car.y,
+            intensity: 1.0,
+            color: "#22c55e",
+            duration: 1000,
+          },
+        })
+      }
+
+      setGameState((prev) => {
+        const newCheckpoints = [...prev.checkpoints]
+        newCheckpoints[prev.currentCheckpoint] = {
+          ...newCheckpoints[prev.currentCheckpoint],
+          passed: true,
+          justPassed: true,
+          passedTime: currentTime,
+        }
+
+        const nextCheckpoint = prev.currentCheckpoint + 1
+        const raceCompleted = nextCheckpoint >= prev.totalCheckpoints
+
+        const newState = {
+          ...prev,
+          checkpoints: newCheckpoints,
+          currentCheckpoint: nextCheckpoint,
+          raceCompleted,
+          bestTime: raceCompleted && (!prev.bestTime || prev.raceTime < prev.bestTime) ? prev.raceTime : prev.bestTime,
+        }
+
+        // Guardado asíncrono
+        if (!raceCompleted) {
+          saveGameAsync(newState)
+        } else {
+          saveStats(prev.raceTime, prev.totalCheckpoints)
+          deleteSavedGame()
+        }
+
+        return newState
+      })
+    },
+    [gameState.car, saveGameAsync],
+  )
+
+  const createPhysicsWorker = useCallback(() => {
+    const workerScript = `
+      self.onmessage = function(e) {
+        const { type, car, keys = [], checkpoints = [], currentCheckpoint = 0, canvasWidth = 1000, canvasHeight = 600 } = e.data
+
+        if (type === 'UPDATE_CAR' && car) {
+          const updatedCar = { ...car }
+          
+          // Aceleración/frenado
+          if (keys.includes('w') || keys.includes('arrowup')) {
+            updatedCar.speed = Math.min(updatedCar.speed + 0.3, updatedCar.maxSpeed)
+          } else if (keys.includes('s') || keys.includes('arrowdown')) {
+            updatedCar.speed = Math.max(updatedCar.speed - 0.3, -updatedCar.maxSpeed / 2)
+          } else {
+            updatedCar.speed *= 0.95
+          }
+
+          // Dirección
+          if (Math.abs(updatedCar.speed) > 0.1) {
+            if (keys.includes('a') || keys.includes('arrowleft')) {
+              updatedCar.angle -= 0.05 * (updatedCar.speed / updatedCar.maxSpeed)
+            }
+            if (keys.includes('d') || keys.includes('arrowright')) {
+              updatedCar.angle += 0.05 * (updatedCar.speed / updatedCar.maxSpeed)
+            }
+          }
+
+          // Movimiento
+          updatedCar.x += Math.cos(updatedCar.angle) * updatedCar.speed
+          updatedCar.y += Math.sin(updatedCar.angle) * updatedCar.speed
+
+          // Límites del canvas
+          updatedCar.x = Math.max(20, Math.min(canvasWidth - 20, updatedCar.x))
+          updatedCar.y = Math.max(20, Math.min(canvasHeight - 20, updatedCar.y))
+
+          self.postMessage({ type: 'CAR_UPDATED', car: updatedCar })
+        }
+
+        if (type === 'CHECK_COLLISION' && car && checkpoints.length > 0) {
+          const checkpoint = checkpoints[currentCheckpoint]
+          if (!checkpoint || checkpoint.passed) return
+
+          const carLeft = car.x - 15
+          const carRight = car.x + 15
+          const carTop = car.y - 8
+          const carBottom = car.y + 8
+
+          const checkLeft = checkpoint.x
+          const checkRight = checkpoint.x + checkpoint.width
+          const checkTop = checkpoint.y
+          const checkBottom = checkpoint.y + checkpoint.height
+
+          const collision = carRight > checkLeft && carLeft < checkRight && 
+                           carBottom > checkTop && carTop < checkBottom
+
+          if (collision) {
+            self.postMessage({ type: 'COLLISION_DETECTED', checkpointId: checkpoint.id })
+          }
+        }
+      }
+    `
+
+    const blob = new Blob([workerScript], { type: "application/javascript" })
+    return new Worker(URL.createObjectURL(blob))
+  }, [])
+
+  const createEffectsWorker = useCallback(() => {
+    const workerScript = `
+      let activeEffects = []
+
+      self.onmessage = function(e) {
+        const { type, effects = [], newEffect, deltaTime = 16 } = e.data
+
+        if (type === 'ADD_EFFECT' && newEffect) {
+          activeEffects.push({
+            ...newEffect,
+            duration: newEffect.duration || 1000
+          })
+        }
+
+        if (type === 'PROCESS_EFFECTS') {
+          activeEffects = activeEffects
+            .map(effect => ({
+              ...effect,
+              duration: (effect.duration || 0) - deltaTime,
+              intensity: effect.intensity ? effect.intensity * 0.98 : 1
+            }))
+            .filter(effect => (effect.duration || 0) > 0)
+
+          self.postMessage({ 
+            type: 'EFFECTS_PROCESSED', 
+            effects: activeEffects 
+          })
+        }
+      }
+    `
+
+    const blob = new Blob([workerScript], { type: "application/javascript" })
+    return new Worker(URL.createObjectURL(blob))
+  }, [])
+
+  const registerServiceWorker = useCallback(async () => {
+    if ("serviceWorker" in navigator) {
+      const swScript = `
+        const CACHE_NAME = 'car-racing-game-v1'
+        const urlsToCache = [
+          '/',
+          '/static/js/bundle.js',
+          '/static/css/main.css'
+        ]
+
+        self.addEventListener('install', function(event) {
+          event.waitUntil(
+            caches.open(CACHE_NAME)
+              .then(function(cache) {
+                console.log('[SW] Cache abierto')
+                return cache.addAll(urlsToCache)
+              })
+          )
+        })
+
+        self.addEventListener('fetch', function(event) {
+          event.respondWith(
+            caches.match(event.request)
+              .then(function(response) {
+                if (response) {
+                  return response
+                }
+                
+                return fetch(event.request).then(function(response) {
+                  if (!response || response.status !== 200 || response.type !== 'basic') {
+                    return response
+                  }
+
+                  const responseToCache = response.clone()
+                  
+                  caches.open(CACHE_NAME)
+                    .then(function(cache) {
+                      cache.put(event.request, responseToCache)
+                    })
+
+                  return response
+                })
+              })
+          )
+        })
+
+        self.addEventListener('sync', function(event) {
+          if (event.tag === 'background-save') {
+            event.waitUntil(
+              new Promise((resolve) => {
+                console.log('[SW] Ejecutando guardado en segundo plano')
+                setTimeout(resolve, 1000)
+              })
+            )
+          }
+        })
+      `
+
+      try {
+        const blob = new Blob([swScript], { type: "application/javascript" })
+        const swUrl = URL.createObjectURL(blob)
+
+        const registration = await navigator.serviceWorker.register(swUrl)
+        console.log("[Game] Service Worker registrado:", registration.scope)
+      } catch (error) {
+        console.log("[Game] Error registrando Service Worker:", error)
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    // Verificar soporte para Workers
+    if (typeof Worker !== "undefined") {
+      setWorkerSupported(true)
+
+      // Inicializar Physics Worker
+      try {
+        physicsWorkerRef.current = createPhysicsWorker()
+        physicsWorkerRef.current.onmessage = (e) => {
+          const { type, car, checkpointId } = e.data
+
+          if (type === "CAR_UPDATED" && car) {
+            setGameState((prev) => ({ ...prev, car }))
+          }
+
+          if (type === "COLLISION_DETECTED") {
+            handleCheckpointCollision(checkpointId)
+          }
+        }
+      } catch (error) {
+        console.log("[Game] Physics Worker no disponible, usando hilo principal")
+        setWorkerSupported(false)
+      }
+
+      // Inicializar Effects Worker
+      try {
+        effectsWorkerRef.current = createEffectsWorker()
+        effectsWorkerRef.current.onmessage = (e) => {
+          const { type, effects } = e.data
+          if (type === "EFFECTS_PROCESSED") {
+            console.log("[Game] Efectos procesados:", effects.length)
+          }
+        }
+      } catch (error) {
+        console.log("[Game] Effects Worker no disponible")
+      }
+    }
+
+    // Registrar Service Worker
+    registerServiceWorker()
+
+    // Detectar modo offline
+    const handleOnline = () => setOfflineMode(false)
+    const handleOffline = () => setOfflineMode(true)
+
+    window.addEventListener("online", handleOnline)
+    window.addEventListener("offline", handleOffline)
+    setOfflineMode(!navigator.onLine)
+
+    return () => {
+      window.removeEventListener("online", handleOnline)
+      window.removeEventListener("offline", handleOffline)
+
+      // Limpiar workers
+      if (physicsWorkerRef.current) {
+        physicsWorkerRef.current.terminate()
+      }
+      if (effectsWorkerRef.current) {
+        effectsWorkerRef.current.terminate()
+      }
+    }
+  }, [createPhysicsWorker, createEffectsWorker, registerServiceWorker, handleCheckpointCollision])
+
   return (
     <div className="w-full space-y-4 relative">
+      <div className="flex gap-2 mb-2">
+        <Badge variant={workerSupported ? "default" : "secondary"} className="text-xs">
+          {workerSupported ? "✓ Web Workers" : "✗ Web Workers"}
+        </Badge>
+        <Badge variant={offlineMode ? "destructive" : "default"} className="text-xs">
+          {offlineMode ? "Offline" : "Online"}
+        </Badge>
+        <Badge variant="default" className="text-xs bg-blue-600 text-white">
+          Async Save
+        </Badge>
+      </div>
+
       {showMainMenu && <MainMenu />}
       {gameState.gamePaused && gameState.gameStarted && <PauseMenu />}
 
