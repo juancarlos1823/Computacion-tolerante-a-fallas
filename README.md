@@ -1,4 +1,4 @@
-# 🏎️ Car Racing Game con Sistema de Checkpoints
+# 🏎️ Car Racing Game con Demonio que graba pantalla
 
 Un videojuego de carreras desarrollado con **Next.js** y **TypeScript** que implementa un sistema avanzado de checkpoints con persistencia de datos y técnicas de programación concurrente.
 
@@ -104,6 +104,27 @@ const saveGameAsync = async (state) => {
   })
 }
 \`\`\`
+
+### Demonio que graba pantalla
+\`\`\`typescript
+// Demonio que graba la pantalla de forma automatica
+que despues se almacena y lo implemente que esas 
+grabacionnes se utilizaran para ver las repeticiones
+de las partidas
+(Esta funcion fuede no funcionar een algunos 
+navegadores ya que por seguridad estas acciones 
+las bloquea)
+Esta es una implementacion provicional busco 
+que al instalar lo en una computadora ejecute 
+el comando de grabar pantalla dependiendo del 
+sistema operativo como por ejemplo en windows 
+(Windows + Alt +G) En mac (Mayusculas + 
+Comando + 5) pero pero es mas complicado en mac
+ya que despues de presionar esas 3 teclas 
+tienes que seleccionar si quieres grabar 
+toda la pantalla o realizar captura
+\`\`\`
+<img width="867" height="803" alt="image" src="https://github.com/user-attachments/assets/92cbd921-2580-438c-94c5-888b8e289a77" />
 
 ## 📊 Arquitectura del Sistema
 
