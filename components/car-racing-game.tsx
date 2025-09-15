@@ -7,6 +7,16 @@ import { Badge } from "@/components/ui/badge"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Separator } from "@/components/ui/separator"
 
+interface Recording {
+  id: string
+  name: string
+  blob: Blob
+  duration: number
+  createdAt: number
+  raceTime: number
+  checkpointsCompleted: number
+}
+
 interface Car {
   x: number
   y: number
@@ -36,6 +46,8 @@ interface GameState {
   totalCheckpoints: number
   raceCompleted: boolean
   bestTime?: number
+  isRecording: boolean
+  currentRecording?: Recording
 }
 
 interface SavedGame {
@@ -56,6 +68,7 @@ interface GameStats {
 
 const STORAGE_KEY = "car-racing-game-save"
 const STATS_KEY = "car-racing-game-stats"
+const RECORDINGS_KEY = "car-racing-game-recordings"
 
 export default function CarRacingGame() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -68,6 +81,14 @@ export default function CarRacingGame() {
   const effectsWorkerRef = useRef<Worker | null>(null)
   const [workerSupported, setWorkerSupported] = useState(false)
   const [offlineMode, setOfflineMode] = useState(false)
+
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const recordedChunksRef = useRef<Blob[]>([])
+  const recordingStartTimeRef = useRef<number>(0)
+
+  const [recordings, setRecordings] = useState<Recording[]>([])
+  const [showRecordings, setShowRecordings] = useState(false)
+  const [recordingSupported, setRecordingSupported] = useState(false)
 
   const [gameState, setGameState] = useState<GameState>({
     car: {
@@ -91,6 +112,7 @@ export default function CarRacingGame() {
     raceTime: 0,
     totalCheckpoints: 6,
     raceCompleted: false,
+    isRecording: false,
   })
 
   const [hasSavedGame, setHasSavedGame] = useState(false)
@@ -202,6 +224,135 @@ export default function CarRacingGame() {
     }
   }, [])
 
+  const loadRecordings = useCallback(() => {
+    try {
+      const saved = localStorage.getItem(RECORDINGS_KEY)
+      if (saved) {
+        const parsedRecordings = JSON.parse(saved)
+        // Convertir blobs guardados de vuelta a Blob objects
+        const recordings = parsedRecordings.map((rec: any) => ({
+          ...rec,
+          blob: new Blob([new Uint8Array(rec.blobData)], { type: "video/webm" }),
+        }))
+        setRecordings(recordings)
+      }
+    } catch (error) {
+      console.error("[Game] Error cargando grabaciones:", error)
+    }
+  }, [])
+
+  const saveRecordings = useCallback((recordings: Recording[]) => {
+    try {
+      // Convertir blobs a arrays para almacenamiento
+      const recordingsToSave = recordings.map(async (rec) => {
+        const arrayBuffer = await rec.blob.arrayBuffer()
+        return {
+          ...rec,
+          blobData: Array.from(new Uint8Array(arrayBuffer)),
+          blob: undefined,
+        }
+      })
+
+      Promise.all(recordingsToSave).then((serializedRecordings) => {
+        localStorage.setItem(RECORDINGS_KEY, JSON.stringify(serializedRecordings))
+      })
+    } catch (error) {
+      console.error("[Game] Error guardando grabaciones:", error)
+    }
+  }, [])
+
+  const startScreenRecording = useCallback(async () => {
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+        alert("La grabación de pantalla no está soportada en este navegador")
+        return
+      }
+
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: {
+          mediaSource: "screen",
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          frameRate: { ideal: 30 },
+        },
+        audio: false,
+      })
+
+      recordedChunksRef.current = []
+      const mediaRecorder = new MediaRecorder(stream, {
+        mimeType: "video/webm;codecs=vp9",
+      })
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          recordedChunksRef.current.push(event.data)
+        }
+      }
+
+      mediaRecorder.onstop = () => {
+        const blob = new Blob(recordedChunksRef.current, { type: "video/webm" })
+        const duration = Date.now() - recordingStartTimeRef.current
+
+        const newRecording: Recording = {
+          id: Date.now().toString(),
+          name: `Carrera ${new Date().toLocaleString()}`,
+          blob,
+          duration,
+          createdAt: Date.now(),
+          raceTime: gameState.raceTime,
+          checkpointsCompleted: gameState.checkpoints.filter((c) => c.passed).length,
+        }
+
+        setRecordings((prev) => {
+          const updated = [...prev, newRecording]
+          saveRecordings(updated)
+          return updated
+        })
+
+        // Detener todas las pistas del stream
+        stream.getTracks().forEach((track) => track.stop())
+      }
+
+      mediaRecorderRef.current = mediaRecorder
+      recordingStartTimeRef.current = Date.now()
+      mediaRecorder.start(1000) // Grabar en chunks de 1 segundo
+
+      setGameState((prev) => ({ ...prev, isRecording: true }))
+    } catch (error) {
+      console.error("[Game] Error iniciando grabación:", error)
+      alert("Error al iniciar la grabación de pantalla")
+    }
+  }, [gameState.raceTime, gameState.checkpoints, saveRecordings])
+
+  const stopScreenRecording = useCallback(() => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+      mediaRecorderRef.current.stop()
+      setGameState((prev) => ({ ...prev, isRecording: false }))
+    }
+  }, [])
+
+  const deleteRecording = useCallback(
+    (recordingId: string) => {
+      setRecordings((prev) => {
+        const updated = prev.filter((rec) => rec.id !== recordingId)
+        saveRecordings(updated)
+        return updated
+      })
+    },
+    [saveRecordings],
+  )
+
+  const downloadRecording = useCallback((recording: Recording) => {
+    const url = URL.createObjectURL(recording.blob)
+    const a = document.createElement("a")
+    a.href = url
+    a.download = `${recording.name}.webm`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }, [])
+
   useEffect(() => {
     const savedGame = loadSavedGame()
     if (savedGame) {
@@ -214,6 +365,16 @@ export default function CarRacingGame() {
       setGameState((prev) => ({ ...prev, bestTime: stats.bestTime }))
     }
   }, [loadSavedGame, loadStats])
+
+  useEffect(() => {
+    const checkRecordingSupport = () => {
+      const supported = !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia)
+      setRecordingSupported(supported)
+    }
+
+    checkRecordingSupport()
+    loadRecordings()
+  }, [loadRecordings])
 
   useEffect(() => {
     if (gameState.gameStarted && !gameState.gamePaused && !gameState.raceCompleted) {
@@ -551,6 +712,12 @@ export default function CarRacingGame() {
     setGameState((prev) => ({ ...prev, gameStarted: true, gamePaused: false }))
     setShowResumeOption(false)
     setShowMainMenu(false)
+
+    if (recordingSupported) {
+      setTimeout(() => {
+        startScreenRecording()
+      }, 1000) // Delay de 1 segundo para que el juego se estabilice
+    }
   }
 
   const pauseGame = () => {
@@ -558,6 +725,10 @@ export default function CarRacingGame() {
   }
 
   const resetGame = () => {
+    if (gameState.isRecording) {
+      stopScreenRecording()
+    }
+
     deleteSavedGame()
     setGameState((prev) => ({
       car: { x: 100, y: 300, angle: 0, speed: 0, maxSpeed: 5 },
@@ -576,6 +747,7 @@ export default function CarRacingGame() {
       totalCheckpoints: 6,
       raceCompleted: false,
       bestTime: prev.bestTime,
+      isRecording: false,
     }))
     setShowMainMenu(true)
   }
@@ -969,7 +1141,108 @@ export default function CarRacingGame() {
   }, [createPhysicsWorker, createEffectsWorker, registerServiceWorker, handleCheckpointCollision])
 
   return (
-    <div className="w-full space-y-4 relative">
+    <div className="w-full max-w-4xl mx-auto p-4">
+      <h1 className="text-3xl font-bold text-center mb-6 text-white">🏎️ Juego de Carros con Checkpoints</h1>
+
+      <Dialog open={showRecordings} onOpenChange={setShowRecordings}>
+        <DialogContent className="max-w-4xl max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>📹 Grabaciones de Partidas</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            {recordings.length === 0 ? (
+              <p className="text-center text-muted-foreground py-8">
+                No hay grabaciones disponibles. Las grabaciones se crean automáticamente al iniciar una partida.
+              </p>
+            ) : (
+              recordings.map((recording) => (
+                <div key={recording.id} className="border rounded-lg p-4 space-y-3">
+                  <div className="flex justify-between items-start">
+                    <div>
+                      <h3 className="font-semibold">{recording.name}</h3>
+                      <div className="text-sm text-muted-foreground space-y-1">
+                        <p>Duración: {Math.round(recording.duration / 1000)}s</p>
+                        <p>Tiempo de carrera: {formatTime(recording.raceTime)}</p>
+                        <p>Checkpoints completados: {recording.checkpointsCompleted}/6</p>
+                        <p>Creado: {new Date(recording.createdAt).toLocaleString()}</p>
+                      </div>
+                    </div>
+                    <div className="space-x-2">
+                      <Button
+                        onClick={() => downloadRecording(recording)}
+                        size="sm"
+                        className="bg-green-600 hover:bg-green-700"
+                      >
+                        Descargar
+                      </Button>
+                      <Button onClick={() => deleteRecording(recording.id)} size="sm" variant="destructive">
+                        Eliminar
+                      </Button>
+                    </div>
+                  </div>
+                  <video
+                    controls
+                    className="w-full max-h-64 bg-black rounded"
+                    src={URL.createObjectURL(recording.blob)}
+                  />
+                </div>
+              ))
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showMainMenu} onOpenChange={setShowMainMenu}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>🏁 Menú Principal</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <Button
+              onClick={() => {
+                setShowMainMenu(false)
+                if (!gameState.gameStarted) startGame()
+              }}
+              className="w-full bg-green-600 hover:bg-green-700"
+            >
+              {gameState.gameStarted ? "Continuar Partida" : "Nueva Partida"}
+            </Button>
+
+            {recordingSupported && (
+              <Button
+                onClick={() => {
+                  setShowMainMenu(false)
+                  setShowRecordings(true)
+                }}
+                className="w-full bg-purple-600 hover:bg-purple-700"
+              >
+                📹 Ver Grabaciones ({recordings.length})
+              </Button>
+            )}
+
+            <Button
+              onClick={() => {
+                setShowMainMenu(false)
+                setShowStats(true)
+              }}
+              className="w-full bg-blue-600 hover:bg-blue-700"
+            >
+              📊 Estadísticas
+            </Button>
+
+            <Button
+              onClick={() => {
+                setShowMainMenu(false)
+                setShowInstructions(true)
+              }}
+              className="w-full bg-gray-600 hover:bg-gray-700"
+            >
+              ❓ Instrucciones
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <div className="flex gap-2 mb-2">
         <Badge variant={workerSupported ? "default" : "secondary"} className="text-xs">
           {workerSupported ? "✓ Web Workers" : "✗ Web Workers"}
@@ -982,7 +1255,6 @@ export default function CarRacingGame() {
         </Badge>
       </div>
 
-      {showMainMenu && <MainMenu />}
       {gameState.gamePaused && gameState.gameStarted && <PauseMenu />}
 
       <Dialog open={showStats} onOpenChange={setShowStats}>
@@ -1121,16 +1393,20 @@ export default function CarRacingGame() {
                 Progreso: {gameState.checkpoints.filter((c) => c.passed).length} / {gameState.totalCheckpoints}
               </span>
               {gameState.gameStarted && !gameState.raceCompleted && (
-                <Badge variant="secondary" className="text-xs">
+                <Badge variant="secondary" className="text-xs bg-blue-600 text-white">
                   Auto-guardado
+                </Badge>
+              )}
+              {gameState.isRecording && (
+                <Badge variant="secondary" className="text-xs bg-red-600 text-white animate-pulse">
+                  🔴 Grabando
                 </Badge>
               )}
             </div>
             <div className="text-sm text-muted-foreground">Tiempo: {formatTime(gameState.raceTime)}</div>
             {gameState.bestTime && (
-              <div className="text-sm text-yellow-600 font-semibold">Mejor: {formatTime(gameState.bestTime)}</div>
+              <div className="text-sm text-muted-foreground">Mejor: {formatTime(gameState.bestTime)}</div>
             )}
-            {gameState.raceCompleted && <div className="text-sm text-green-600 font-bold">¡COMPLETADO!</div>}
           </div>
         </div>
 
